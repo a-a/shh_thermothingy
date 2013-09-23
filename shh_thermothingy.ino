@@ -1,23 +1,19 @@
 /* ===========================================================
-    SHH_Thermothingy. GPLv3 20130916 R01B JT
+    SHH_Thermothingy. GPLv3 20130923 JT
     Moans to /dev/null if i screwed it up.
-  ============================================================
-  Changelog:
-  
-  20130916 R01A - Initial revision
-    Made some shit work- can calculate a few things but no output yet.
-  
-  20130917 R01B -
-    Added EEPROM Read/Write, shiftOut and stuff to make sure it displays properly.
-    Still to do: Serial interface, writing serial read values back to eeprom.  
-  
-  ==========================================================*/
+  ===========================================================*/
 
 //setup our shit for the eeprom
 #include <EEPROMEx.h>  //EEPROMEx Library. Located at http://playground.arduino.cc//Code/EEPROMex
 #define CONFIG_VERSION 1001 // ID of the settings block. change to trigger rewrite of eeprom.
 #define memoryBase 32 //location of data in EEPROM storage
+#define MCHARS 8            // max characters to accept in interactive cli
+#define ENTER 13            // byte value of the Enter key (LF)
+char inStr[MCHARS];         // the input string for serial cli
+int strCount = 0;           // counter for the string
 bool ok  = true; //this is used to check if eeprom is read ok. changed to false later on in the code when eeprom fails to verify.
+bool doWait = true; //used if we need to wait in a loop
+bool unsavedChanges = false; //changed to true if user attempts to exit and does not save changes back to eeprom
 int configAddress=0; //define where the config starts
 
 //IO vars. Won't change.
@@ -46,9 +42,10 @@ struct StoreStruct {long version, targetFunds, currFunds;} storage = { CONFIG_VE
 
 //crumpets
 void setup() {
-  Serial.begin(9600); //tell ide that we want a serial session opened
   totalLEDs=(srCount*srLEDs); //multiply leds on register by number of register
-  Serial.println("Load...");
+  Serial.begin(9600); //tell ide that we want a serial session opened
+  Serial.println(); //nice tidy new line for our crap
+  Serial.print("Load... "); //let user know we're starting up
   pinMode(sdPin, OUTPUT); //set shift register DATA pin as an output
   pinMode(scPin, OUTPUT); //same for CLOCK pin..
   pinMode(slPin, OUTPUT); //and the LATCH pin too.
@@ -67,51 +64,148 @@ void setup() {
     storage.targetFunds = 16000;  //write example target funds value to storage
     storage.currFunds = 8000;  //write example current funds value to storage
     saveConfig();  //subroutine saveConfig writes values from storage to eeprom.
-    Serial.println("EEPROM Initialized. Restarting.");
+    Serial.println("EEPROM Initialized. Restarting!");
     delay(500); //Settle down.
-    asm volatile("JMP 0"); //L0L H4X! Restart code... (FIXME?)
+    doReset();
   } else { //otherwise the config has loaded and verified ok
     Serial.print("Reading signature: '"); Serial.print(storage.version); Serial.println("' Config verified!"); // let user know that the config's good
     currFunds=storage.currFunds; //load current funds variable with the data stored in our EEPROM
     targetFunds=storage.targetFunds; //load target funds from the EEPROM too.
+    Serial.println("Current settings are as follows");
     Serial.print("cF:"); Serial.print(currFunds); Serial.print(" tF:"); Serial.println(targetFunds);  //print out the data we've just loaded from eeprom.
-
   }
   computeSegments(); //run segment computation sub to give display initial data before we jump into main loop. (no need to write display in a loop!)
+  Serial.print("> "); //print prompt for user
 }
 
-void loop() {  
-  //read the serial for a mode command or some shit like that
-  
-  // kludge to manipulate cF var at runtime. somebody kill this before it kills you.
-   if (Serial.available() > 0) {
-  inByte = Serial.read();
-  switch (inByte) {
-    case 100:     //d
-      Serial.println("100");
-      currFunds=currFunds-1000;
-      computeSegments();
-      break;
-    case 101:     //e
-      Serial.println("101");
-      currFunds=currFunds+1000;
-      computeSegments();
-      break;
-    default:
-      Serial.println("er");
+void loop() {
+  if (Serial.available() > 0) { //if serial data is available
+  inByte = Serial.read(); //read serial data to var inByte
+  switch (inByte) {  //what is our inByte?
+    case 99: // inbyte is ascii "c" 
+      serialSettings(); //call serialSettings
+      break;    
+    default: // case not matched, fall back to default
+      Serial.print("er ");
+      Serial.print(inByte, DEC);
+      Serial.println("?");
+      Serial.println("Hint: Send ascii 'c' to enter configure mode.");
+      Serial.print("> ");
     }
    }
 }
 
 void serialSettings(){
-  Serial.println("Current settings are as follows");
-  Serial.print("cF:"); Serial.print(currFunds); Serial.print(" tF:"); Serial.println(targetFunds);  //print out settings data
+  printSettings(); //call printSettings to print out settings data
   Serial.println("Adjust? y/n?");
   //trap ourselves in a loop here and wait for serial input
+  while (doWait == true) {
+       if (Serial.available() > 0) {
+  inByte = Serial.read();
+  switch (inByte) {
+    case 121:     // ascii "y" - user wants to adjust settings.
+      Serial.print("Config> ");                      // print the config prompt
+      while (doWait == true) {                      // use doWait to stay in loop
+          if(Serial.available()) {                 // if bytes are available to be read
+          inByte = Serial.read();                // read the byte
+          Serial.print(char(inByte));            // echo byte entered to terminal as a char
+          if(inByte != ENTER) {                  // if the byte is not a NEWLINE
+            inStr[strCount] = char(inByte);      // add the byte to the input string array
+            strCount++;                          // increase the string item count
+          } 
+        }
+        if(inByte == ENTER || strCount >= MCHARS) {  // if enter was pressed or max chars reached
+          Serial.flush();                         // flush the serial data (overkill?)
+          Serial.println("");                     // print a newline
+          if (inStr[0] == 'c') {  //if input stats with c, such as "c1234567"
+            currFunds = atol(&inStr[1]); //convert char arrya inStr to long integer. YO ITS atol() FOR LONGS NOT atoi() YOU LAZY SHITBAG
+            Serial.println(currFunds);  //print out new data
+          } else if (inStr[0] == 't') { //if input starts with t, such as "t1234567"
+            targetFunds = atol(&inStr[1]); //convert char arrya inStr to long integer.
+            Serial.println(targetFunds);  //print out new data
+          } else if (strcmp(inStr, "reset") == 0){ //if thingy has reset in it
+            doReset();  //go to reset subroutine
+          } else if (strcmp(inStr, "write") == 0){
+            storage.targetFunds = targetFunds;  //write target funds value to storage
+            storage.currFunds = currFunds;  //write current funds value to storage
+            saveConfig();  //subroutine saveConfig writes values from storage to eeprom.  
+            doWait = false; //get out of loop
+          } else if (strcmp(inStr, "exit") == 0){ //if user says exit
+            if (currFunds != storage.currFunds  || targetFunds != storage.targetFunds) {//Check if there's unsaved changes - does ram vars match eeprom vars?
+              Serial.print("Unsaved changes detected. ");
+              printSettings();
+              unsavedChanges = true;
+            } 
+            if (unsavedChanges == true) { //if there are unsaved changes
+              Serial.print("Save before exit? y/n");
+               while (doWait == true) {
+                 if (Serial.available() > 0) {
+                  inByte = Serial.read();
+                  switch (inByte) {
+                    case 121:     //y
+                    Serial.println(" y");
+                    Serial.print("Writing changes to EEPROM.... ");
+                    storage.targetFunds = targetFunds;  //write target funds value to storage
+                    storage.currFunds = currFunds;  //write current funds value to storage
+                    saveConfig();  //subroutine saveConfig writes values from storage to eeprom.    
+                    doWait=false;
+                    break;
+                    case 110:     //n
+                    Serial.println(" n");
+                    doWait=false;
+                    Serial.println("Changes remain unsaved to EEPROM.");
+                    break;   
+                    default:
+                    Serial.print("er ");
+                    Serial.print(inByte, DEC);
+                    Serial.println("? A valid response is y or n.");
+                  }
+                 }
+                }
+                doWait=false;    
+            }
+            doWait = false;
+          } else {                                // if the input text doesn't match any defined above
+            Serial.print(inStr[0]);
+            Serial.println(" is invalid.");           // echo back to the terminal
+            Serial.println("Hint: Valid command 'c0000000' and 't0000000' to set current and target funds, exit to exit, write to write.");
+          }
+          strCount = 0;                           // get ready for new input... reset strCount 
+          inByte = 0;                             // reset the inByte variable
+          for(int i = 0; inStr[i] != '\0'; i++) { // while the string does not have null
+            inStr[i] = '\0';                      // fill it with null to erase it
+          }
+          if (doWait == true) {  
+            Serial.println("");                     // print a newline
+            Serial.print("Config> ");                      // print the prompt
+          } else {
+            Serial.println("Done configuring.");
+            printSettings(); //print out configuration data.
+            computeSegments(); //redraw display
+            Serial.print("> "); //print the prompt
+          }
+        }
+      }
+      doWait == false;
+      break;
+    case 110:     //n
+      doWait=false;
+      Serial.println("Adjustment cancelled.");
+      Serial.print("> ");
+      break;   
+    default:
+      Serial.print("er ");
+      Serial.print(inByte, DEC);
+      Serial.println("?");
+    }
+   }
+  }
+  doWait=true;
 }
 
 void computeSegments(){
   // *********** This bit works out how many segments to display. ***********
+  Serial.print("computeSegments called. ");
   fundsPerSeg=(targetFunds/totalLEDs); //divide target funds by number of leds to work out how much we need for each segment to be lit
   litSegs=(currFunds/fundsPerSeg); //divide current funds by the calculated amount we need to light each segment.
   if ( litSegs < 0 ) { Serial.println("CalcERR - litSegs less than 0!"); litSegs=0; } //catch erroneous conditions
@@ -131,11 +225,12 @@ void computeSegments(){
   }
   Serial.print("srA:"); Serial.print(srA); Serial.print(" srB:"); Serial.println(srB); //debug- print shift register values over serial.
   digitalWrite(slPin,0); //tell shift registers to expect data.
-  shiftOut(sdPin, scPin, MSBFIRST, srB); //shift out 2nd register FIRSTR (will be pushed inso srB when data pushed into srA)
+  shiftOut(sdPin, scPin, MSBFIRST, srB); //shift out 2nd register FIRSTR (will be pushed into srB when data pushed into srA)
   shiftOut(sdPin, scPin, MSBFIRST, srA); //shift out data to first register.
   digitalWrite(slPin,1); //tell shift registers to expect no more data.
-  
 }
+
+
 
 bool loadConfig() {
   EEPROM.readBlock(configAddress, storage);    //read storage block of EEPROM.
@@ -144,6 +239,18 @@ bool loadConfig() {
 
 void saveConfig() {
    EEPROM.writeBlock(configAddress, storage);  //write back the config block.
-   Serial.println("Wrote to EEPROM. Sleeping for 1Secs.");  //let the user know what just happened.
    delay(1000); //sleep so we can't burn out the eeprom if we're stuck in a loop
+   Serial.println("Wrote to EEPROM!");  //let the user know what just happened.
+}
+
+void doReset() {
+   asm volatile("NOP");
+   asm volatile("JMP 0"); //L0L H4X! Restart code...
+}
+
+void printSettings () { //This is used to print out setting in chip ram and eeprom. (
+    Serial.print("Settings in RAM: ");
+    Serial.print("cF:"); Serial.print(currFunds); Serial.print(" tF:"); Serial.println(targetFunds);
+    Serial.print("Settings in EEPROM: ");
+    Serial.print("cF:"); Serial.print(storage.currFunds); Serial.print(" tF:"); Serial.println(storage.targetFunds);
 }
